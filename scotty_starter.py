@@ -79,8 +79,23 @@ GRAVITY = 2000
 # One loop of the street. A multiple of the ground layer width (1280) so the floor tiles seamlessly.
 SEGMENT_LEN = 3 * 1280
 START_X = 320                        # where Scotty appears at the start of a loop
-GOAL_LOOPS = 8                       # correct calls in a row needed to escape
 ANOMALY_CHANCE = 0.5
+
+
+class Mode:
+    def __init__(self, title, goal, chance_mult, forgiving, blurb):
+        self.title = title              # shown on the menu and the win screen
+        self.goal = goal                # correct calls in a row needed to escape
+        self.chance_mult = chance_mult  # scales every anomaly chance (cat, tornado, regular)
+        self.forgiving = forgiving      # demo: a wrong call is explained and the same street comes back
+        self.blurb = blurb
+
+
+MODES = [
+    Mode("DEMO", 3, 1.0, True, "3 exits. Mistakes are explained. You can't lose."),
+    Mode("EXIT 8", 8, 1.0, False, "One mistake sends you back to Exit 0."),
+    Mode("EXIT 112", 112, 1.5, False, "112 exits. Anomalies are 50% more likely."),
+]
 
 # Decor placement along one loop: (kind, world x of the sprite's centre)
 STREET_LAYOUT = [
@@ -133,6 +148,33 @@ TORNADO_CHANCE = 1 / 20   # chance each loop that the wind keeps rising until a 
 TORNADO_DELAY = 9.0       # seconds of rising wind before it appears
 TORNADO_SPEED = 320       # px/s: faster than walking, slower than running
 TORNADO_REACH = 70        # px: this close and Scotty is caught
+# What the demo tells you after you walk past an anomaly: "Something was wrong: <this>."
+ANOMALY_HINTS = {
+    "student_watching": "the student was facing you, and moved when you weren't looking",
+    "student_eyes": "the student was too tall, with glowing red eyes",
+    "extra_bench": "there was an extra bench",
+    "missing_palm": "a palm tree was missing",
+    "whiteboard": "the whiteboard had a message for you",
+    "frozen_skyline": "the city in the background had stopped moving",
+    "lamps_off": "all the street lamps were off",
+    "lamp_red": "one lamp was burning red",
+    "lamp_tall": "one lamp was taller than the others",
+    "lamp_tilt": "one lamp was leaning",
+    "lamp_missing": "one lamp was missing",
+    "shop_sign": "the coffee shop's name was misspelled",
+    "shop_cups": "a cup was missing from the shop window",
+    "shop_open": "the sign on the shop door was wrong",
+    "shop_door": "the shop door was open, and something was inside",
+    "shop_figure": "someone was standing in the shop window",
+    "shop_dark": "the coffee shop's lights were off",
+    "shop_clock": "the shop clock was running backwards",
+    "shop_menu": "the karak price was 99 QR instead of 1 QR",
+    "student_murmur": "the student was muttering (listen!)",
+    "wind_stops": "the wind had stopped (listen!)",
+    "cafe_heartbeat": "a heartbeat was coming from the coffee shop (listen!)",
+    "cat": "Scotty was a cat",
+    "tornado": "the wind kept rising: a tornado was coming",
+}
 NORMAL_BOARD = None       # draw the whiteboard art as-is
 ANOMALY_BOARDS = ["TURN BACK", "SCOTTY\nGO HOME", "WHY ARE YOU\nSTILL HERE", "IT'S BEHIND\nYOU"]
 SHOP_SIGN = "KARAK HOUSE"
@@ -421,9 +463,12 @@ class Street:
         self.board_cache = {}
         self.shop_cache = {}
         self.scotty_x = START_X
+        self.mode = MODES[1]
         self.reset()
 
-    def reset(self):
+    def reset(self, mode=None):
+        if mode is not None:
+            self.mode = mode
         self.progress = 0          # correct calls in a row
         self.loops = 0             # loops entered so far
         self.fails = 0
@@ -432,6 +477,8 @@ class Street:
         self.prev = Loop()         # the loop Scotty just left (still visible behind him)
         self.normal = Loop()       # what the next loop looks like from a distance
         self.last_exit = None      # how Scotty left the last loop: "forward", "back" or "caught"
+        self.last_correct = None   # whether that was the right call
+        self.mistake = None        # demo only: what Scotty got wrong on the street he's retrying
 
     @property
     def anomaly(self):
@@ -447,36 +494,62 @@ class Street:
 
     def roll_anomaly(self):
         # Exit 0 is always normal, so the player can (re)learn what the street should look like
-        if self.loops <= 1 or self.progress == 0:
+        if self.progress == 0:
             return None
-        if random.random() < CAT_CHANCE:
+        if self.mode.forgiving and self.progress == 1:    # the demo always shows at least one anomaly
+            return random.choice(ANOMALIES)
+        if self.loops <= 1:
+            return None
+        m = self.mode.chance_mult
+        if random.random() < CAT_CHANCE * m:
             return "cat"
-        if random.random() < TORNADO_CHANCE:
+        if random.random() < TORNADO_CHANCE * m:
             return "tornado"
-        if random.random() > ANOMALY_CHANCE:
+        if random.random() > ANOMALY_CHANCE * m:
             return None
         return random.choice(ANOMALIES)
 
+    def is_correct(self, went_forward):
+        return (self.anomaly is None) == went_forward
+
     def progress_if(self, went_forward):
-        correct = (self.anomaly is None) == went_forward
-        return self.progress + 1 if correct else 0
+        if self.is_correct(went_forward):
+            return self.progress + 1
+        return self.progress if self.mode.forgiving else 0
+
+    def explain(self, caught):
+        """Demo: what went wrong on the street Scotty just left."""
+        if caught:
+            return "The tornado caught Scotty. When the wind keeps rising, run back!"
+        if self.anomaly is None:
+            return "Nothing was wrong on that street, so you should have kept going."
+        return f"Something was wrong: {ANOMALY_HINTS[self.anomaly]}."
 
     def finish_loop(self, went_forward, caught=False):
         """Judge Scotty's choice and set up the next loop. Returns True if the call was right.
-        Being caught by the tornado always counts as a wrong call."""
-        new_progress = 0 if caught else self.progress_if(went_forward)
+        Being caught by the tornado always counts as a wrong call.
+        In the demo a wrong call keeps your progress and sends you down the same street again."""
+        correct = not caught and self.is_correct(went_forward)
         self.last_exit = "caught" if caught else "forward" if went_forward else "back"
-        correct = new_progress > 0
-        self.progress = new_progress
-        if not correct:
-            self.fails += 1
+        self.last_correct = correct
         self.loops += 1
-        self.start_loop(self.roll_anomaly())
+        if correct:
+            self.progress += 1
+            self.mistake = None
+            self.start_loop(self.roll_anomaly())
+        else:
+            self.fails += 1
+            if self.mode.forgiving:
+                self.mistake = self.explain(caught)
+                self.start_loop(self.anomaly)
+            else:
+                self.progress = 0
+                self.start_loop(self.roll_anomaly())
         return correct
 
     @property
     def target_corruption(self):
-        return min(1.0, self.progress / (GOAL_LOOPS - 1))
+        return min(1.0, self.progress / max(1, self.mode.goal - 1))
 
     def update(self, dt, scotty, camera_x):
         self.corruption += (self.target_corruption - self.corruption) * min(1.0, dt * 0.6)
@@ -702,7 +775,7 @@ class Street:
                         surface.blit(info[0], info[1])
                     continue
                 if kind == "sign":
-                    img = self.sign_image(min(sign_progress, GOAL_LOOPS))
+                    img = self.sign_image(min(sign_progress, self.mode.goal))
                 elif kind == "whiteboard":
                     img = self.board_image(loop.board_text)
                 else:
@@ -845,11 +918,12 @@ def main():
     effects = Effects()
     audio = GameAudio(STREET_LAYOUT, SHOP_X, SEGMENT_LEN)
 
-    def new_game():
-        street.reset()
+    def new_game(mode=None):
+        street.reset(mode)
         return Scotty(anims, x=START_X), START_X - SCREEN_W / 2
 
-    scotty, camera_x = new_game()
+    selected = 1                   # menu choice: index into MODES (Exit 8 by default)
+    scotty, camera_x = new_game(MODES[selected])
     scroll_x = camera_x            # parallax scroll; unlike camera_x it never jumps when the loop wraps
     state = "title"                # title -> playing -> ending
     debug = False
@@ -875,12 +949,24 @@ def main():
                 elif event.key == pygame.K_F2:
                     options = [None, "cat", "tornado"] + ANOMALIES
                     street.set_anomaly(options[(options.index(street.anomaly) + 1) % len(options)])
-                elif state == "title" and event.key in (pygame.K_SPACE, pygame.K_RETURN):
-                    state = "playing"
+                elif state == "title":
+                    if event.key in (pygame.K_UP, pygame.K_w):
+                        selected = (selected - 1) % len(MODES)
+                    elif event.key in (pygame.K_DOWN, pygame.K_s):
+                        selected = (selected + 1) % len(MODES)
+                    elif event.key in (pygame.K_1, pygame.K_2, pygame.K_3):
+                        selected = event.key - pygame.K_1
+                    if event.key in (pygame.K_SPACE, pygame.K_RETURN, pygame.K_1, pygame.K_2, pygame.K_3):
+                        scotty, camera_x = new_game(MODES[selected])
+                        state = "playing"
                     continue
                 elif state == "ending" and event.key == pygame.K_r:
                     scotty, camera_x = new_game()
                     state = "playing"
+                    continue
+                elif state == "ending" and event.key == pygame.K_t:
+                    scotty, camera_x = new_game()
+                    state = "title"
                     continue
             if state == "playing":
                 scotty.handle_event(event)
@@ -912,7 +998,7 @@ def main():
                     fade = 1.0
                 flash = FLASH_TIME
                 flash_colour = (30, 190, 70) if correct else (180, 0, 0)
-                if street.progress >= GOAL_LOOPS:
+                if street.progress >= street.mode.goal:
                     state = "ending"
 
         street.scotty_x = scotty.x
@@ -950,19 +1036,40 @@ def main():
 
         # ---- text
         if state == "title":
-            draw_text(canvas, big_font, "SCOTTY: AFTER HOURS", (SCREEN_W // 2, 60), center=True)
-            draw_text(canvas, mid_font,
-                      "Walk the street.\nIf something is wrong, turn back.\nIf nothing is wrong, keep going.\n"
-                      f"Make the right call {GOAL_LOOPS} times to get out.",
-                      (SCREEN_W // 2, 170), center=True)
-            draw_text(canvas, mid_font, "Turn your sound on. Some things can only be heard.",
-                      (SCREEN_W // 2, 340), color=(255, 215, 120), center=True)
-            draw_text(canvas, font, "Press Space to start", (SCREEN_W // 2, 405), center=True)
-        elif state == "ending":
-            draw_text(canvas, big_font, "EXIT 8", (SCREEN_W // 2, 190), center=True)
-            draw_text(canvas, mid_font, "The street lets Scotty go.\n...for tonight.", (SCREEN_W // 2, 280),
+            draw_text(canvas, big_font, "SCOTTY: AFTER HOURS", (SCREEN_W // 2, 24), center=True)
+            draw_text(canvas, font,
+                      "Walk the street.  If something is wrong, turn back.  If nothing is wrong, keep going.",
+                      (SCREEN_W // 2, 128), center=True)
+            # mode menu: one panel, the selected mode highlighted
+            lh = mid_font.get_linesize() + 8
+            menu = pygame.Rect(0, 0, 900, lh * len(MODES) + 24)
+            menu.midtop = (SCREEN_W // 2, 185)
+            bg = pygame.Surface(menu.size, pygame.SRCALPHA)
+            pygame.draw.rect(bg, (8, 4, 12, 170), bg.get_rect(), border_radius=12)
+            canvas.blit(bg, menu)
+            for i, mode in enumerate(MODES):
+                on = i == selected
+                colour = (255, 215, 120) if on else (200, 190, 200)
+                y = menu.top + 12 + i * lh
+                draw_text(canvas, mid_font, f"{'>' if on else ' '} {i + 1}  {mode.title}", (menu.left + 30, y),
+                          color=colour, panel=False)
+                draw_text(canvas, font, mode.blurb, (menu.left + 330, y + 6), color=colour, panel=False)
+            draw_text(canvas, font, "Turn your sound on. Some things can only be heard.",
+                      (SCREEN_W // 2, menu.bottom + 22), color=(255, 215, 120), center=True)
+            draw_text(canvas, font, "Press 1 / 2 / 3, or Up / Down and Space", (SCREEN_W // 2, menu.bottom + 72),
                       center=True)
-            draw_text(canvas, font, "Press R to walk again   Esc to quit", (SCREEN_W // 2, 400), center=True)
+        elif state == "ending":
+            mode = street.mode
+            if mode.forgiving:
+                lines = "Demo complete.\nNow try the real thing: Exit 8."
+            else:
+                lines = "The street lets Scotty go.\n...for tonight."
+            draw_text(canvas, big_font, f"EXIT {mode.goal}", (SCREEN_W // 2, 160), center=True)
+            draw_text(canvas, mid_font, lines, (SCREEN_W // 2, 270), center=True)
+            draw_text(canvas, font, "R walk again   T choose mode   Esc quit", (SCREEN_W // 2, 390), center=True)
+        elif street.mistake:
+            draw_text(canvas, mid_font, street.mistake, (SCREEN_W // 2, 60), color=(255, 150, 140), center=True)
+            draw_text(canvas, font, "It's the same street again. Try again.", (SCREEN_W // 2, 120), center=True)
         elif street.progress == 0:
             if street.loops == 0:
                 draw_text(canvas, font, "A/D move  Shift run  Space jump  B bark  M mute", (16, 14))
@@ -972,7 +1079,7 @@ def main():
 
         if debug:
             info = (f"fps {clock.get_fps():.0f}  x {scotty.x:.0f}  cam {camera_x:.0f}  loop {street.loops}  "
-                    f"progress {street.progress}  anomaly {street.anomaly}  corruption {street.corruption:.2f}  "
+                    f"mode {street.mode.title}  progress {street.progress}  anomaly {street.anomaly}  corruption {street.corruption:.2f}  "
                     f"(F2 cycles anomaly)")
             draw_text(canvas, font, info, (16, SCREEN_H - 40))
 

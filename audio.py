@@ -217,7 +217,7 @@ class GameAudio:
         else:
             self.play("turn_back", 0.85)
             self.duck = 1.0
-        if street.progress > 0:
+        if street.last_correct:
             self.play(f"chime_{min(street.progress, 8)}", 0.5, delay=0.15 if went_forward else 0.6)
         else:
             self.play("wrong", 1.0, delay=0.0 if went_forward else 0.25)
